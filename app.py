@@ -296,6 +296,7 @@ class TTSEngine:
             "accept": "*/*",
             "x-api-key": api_key,
             "content-type": "application/json",
+            "ngrok-skip-browser-warning": "1",
             "user-agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -932,4 +933,5 @@ with tab2:
                     use_container_width=False,
 
                 )
+
 
