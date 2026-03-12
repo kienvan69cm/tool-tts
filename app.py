@@ -1,14 +1,15 @@
 import asyncio
 import base64
 import json
-import os
 import re
+import shutil
 import time
 from pathlib import Path
 
 import httpx
 import streamlit as st
 from pydub import AudioSegment
+from streamlit_local_storage import LocalStorage
 
 
 # =========================
@@ -17,8 +18,6 @@ from pydub import AudioSegment
 APP_DIR = Path(".").resolve()
 OUTPUT_DIR = APP_DIR / "tts_output"
 SENTENCES_DIR = OUTPUT_DIR / "sentences"
-VOICES_FILE = APP_DIR / "voices.json"
-SETTINGS_FILE = APP_DIR / "settings.json"
 SENTENCES_META_FILE = OUTPUT_DIR / "sentences.json"
 
 PROXY_API_URL = "https://unendowed-jacquelyn-guilefully.ngrok-free.dev/v1/tts"
@@ -33,10 +32,105 @@ DEFAULT_SETTINGS = {
     "pause_ms": "300",
     "output_name": "final_output.mp3",
     "selected_voice_name": "Mặc định",
+    "project_name": "default",
+    "main_text": "",
+    "input_mode": "text",
 }
 
 MAX_CONCURRENT = 5
 BLOCK_VERSION = 0
+
+LS_PREFIX = "lucylab_tts"
+
+
+# =========================
+# LOCAL STORAGE HELPERS
+# =========================
+def ls_key(name: str) -> str:
+    return f"{LS_PREFIX}:{name}"
+
+
+def load_json_from_ls(localS: LocalStorage, key: str, default):
+    try:
+        raw = localS.getItem(ls_key(key))
+        if raw in (None, "", "null", "undefined"):
+            return default
+        return json.loads(raw)
+    except Exception:
+        return default
+
+
+def save_json_to_ls(localS: LocalStorage, key: str, value):
+    try:
+        localS.setItem(ls_key(key), json.dumps(value, ensure_ascii=False))
+    except Exception:
+        pass
+
+
+def load_str_from_ls(localS: LocalStorage, key: str, default: str = "") -> str:
+    try:
+        val = localS.getItem(ls_key(key))
+        if val in (None, "null", "undefined"):
+            return default
+        return str(val)
+    except Exception:
+        return default
+
+
+def save_str_to_ls(localS: LocalStorage, key: str, value: str):
+    try:
+        localS.setItem(ls_key(key), value if value is not None else "")
+    except Exception:
+        pass
+
+
+def load_browser_state(localS: LocalStorage):
+    data = {
+        "project_name": load_str_from_ls(localS, "project_name", DEFAULT_SETTINGS["project_name"]),
+        "proxy_api_key": load_str_from_ls(localS, "proxy_api_key", DEFAULT_SETTINGS["proxy_api_key"]),
+        "speed": load_str_from_ls(localS, "speed", DEFAULT_SETTINGS["speed"]),
+        "pause_ms": load_str_from_ls(localS, "pause_ms", DEFAULT_SETTINGS["pause_ms"]),
+        "output_name": load_str_from_ls(localS, "output_name", DEFAULT_SETTINGS["output_name"]),
+        "selected_voice_name": load_str_from_ls(localS, "selected_voice_name", DEFAULT_SETTINGS["selected_voice_name"]),
+        "main_text": load_str_from_ls(localS, "main_text", DEFAULT_SETTINGS["main_text"]),
+        "input_mode": load_str_from_ls(localS, "input_mode", DEFAULT_SETTINGS["input_mode"]),
+        "voices": load_json_from_ls(localS, "voices", DEFAULT_VOICES.copy()),
+    }
+
+    if not isinstance(data["voices"], dict) or not data["voices"]:
+        data["voices"] = DEFAULT_VOICES.copy()
+
+    return data
+
+
+def save_browser_state(localS: LocalStorage):
+    save_str_to_ls(localS, "project_name", st.session_state.get("project_name", "default"))
+    save_str_to_ls(localS, "proxy_api_key", st.session_state.get("proxy_api_key", ""))
+    save_str_to_ls(localS, "speed", st.session_state.get("speed", DEFAULT_SETTINGS["speed"]))
+    save_str_to_ls(localS, "pause_ms", st.session_state.get("pause_ms", DEFAULT_SETTINGS["pause_ms"]))
+    save_str_to_ls(localS, "output_name", st.session_state.get("output_name", DEFAULT_SETTINGS["output_name"]))
+    save_str_to_ls(localS, "selected_voice_name", st.session_state.get("selected_voice_name", DEFAULT_SETTINGS["selected_voice_name"]))
+    save_str_to_ls(localS, "main_text", st.session_state.get("main_text", ""))
+    save_str_to_ls(localS, "input_mode", st.session_state.get("input_mode", "text"))
+    save_json_to_ls(localS, "voices", st.session_state.get("voices", DEFAULT_VOICES.copy()))
+
+
+def clear_browser_state(localS: LocalStorage):
+    for k in [
+        "project_name",
+        "proxy_api_key",
+        "speed",
+        "pause_ms",
+        "output_name",
+        "selected_voice_name",
+        "main_text",
+        "input_mode",
+        "voices",
+    ]:
+        try:
+            localS.deleteItem(ls_key(k))
+        except Exception:
+            pass
 
 
 # =========================
@@ -47,47 +141,18 @@ def ensure_dirs():
     SENTENCES_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def clear_runtime_files():
+    if OUTPUT_DIR.exists():
+        shutil.rmtree(OUTPUT_DIR, ignore_errors=True)
+    ensure_dirs()
+
+
 def split_sentences(text: str):
     text = re.sub(r"\s+", " ", text).strip()
     if not text:
         return []
     parts = re.split(r"(?<=[.!?…])\s+", text)
     return [p.strip() for p in parts if p.strip()]
-
-
-def load_voices():
-    if VOICES_FILE.exists():
-        try:
-            data = json.loads(VOICES_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, dict) and data:
-                return data
-        except Exception:
-            pass
-    VOICES_FILE.write_text(json.dumps(DEFAULT_VOICES, ensure_ascii=False, indent=2), encoding="utf-8")
-    return DEFAULT_VOICES.copy()
-
-
-def save_voices(voices: dict):
-    VOICES_FILE.write_text(json.dumps(voices, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def load_settings():
-    if SETTINGS_FILE.exists():
-        try:
-            data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                merged = DEFAULT_SETTINGS.copy()
-                merged.update(data)
-                return merged
-        except Exception:
-            pass
-    return DEFAULT_SETTINGS.copy()
-
-
-def save_settings(data: dict):
-    merged = DEFAULT_SETTINGS.copy()
-    merged.update(data or {})
-    SETTINGS_FILE.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def extract_audio_info(data):
@@ -296,7 +361,6 @@ class TTSEngine:
             "accept": "*/*",
             "x-api-key": api_key,
             "content-type": "application/json",
-            "ngrok-skip-browser-warning": "1",
             "user-agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -606,38 +670,79 @@ class TTSEngine:
 # STREAMLIT UI
 # =========================
 ensure_dirs()
+localS = LocalStorage()
 
 if "runtime_logs" not in st.session_state:
     st.session_state["runtime_logs"] = []
 
-if "input_mode" not in st.session_state:
-    st.session_state["input_mode"] = "text"
+if "browser_bootstrap_done" not in st.session_state:
+    st.session_state["browser_bootstrap_done"] = False
+
+if not st.session_state["browser_bootstrap_done"]:
+    browser_data = load_browser_state(localS)
+
+    st.session_state["project_name"] = browser_data["project_name"]
+    st.session_state["proxy_api_key"] = browser_data["proxy_api_key"]
+    st.session_state["speed"] = browser_data["speed"]
+    st.session_state["pause_ms"] = browser_data["pause_ms"]
+    st.session_state["output_name"] = browser_data["output_name"]
+    st.session_state["selected_voice_name"] = browser_data["selected_voice_name"]
+    st.session_state["main_text"] = browser_data["main_text"]
+    st.session_state["input_mode"] = browser_data["input_mode"]
+    st.session_state["voices"] = browser_data["voices"]
+
+    st.session_state["browser_bootstrap_done"] = True
 
 st.set_page_config(page_title="LucyLab TTS Studio", layout="wide")
 st.title("LucyLab TTS Studio")
-st.caption("Streamlit proxy client")
+st.caption("Streamlit proxy client | lưu cấu hình tạm trên trình duyệt")
 
-voices = load_voices()
-settings_data = load_settings()
+voices = st.session_state.get("voices", DEFAULT_VOICES.copy())
+if not isinstance(voices, dict) or not voices:
+    voices = DEFAULT_VOICES.copy()
+    st.session_state["voices"] = voices
+
 engine = TTSEngine()
 
 with st.sidebar:
+    st.subheader("Project")
+    project_name = st.text_input(
+        "Tên project",
+        value=st.session_state.get("project_name", "default")
+    )
+    st.session_state["project_name"] = project_name
+
     st.subheader("Kết nối")
     api_key = st.text_input(
         "API Key",
-        value=settings_data.get("proxy_api_key", ""),
+        value=st.session_state.get("proxy_api_key", ""),
         type="password"
     )
+    st.session_state["proxy_api_key"] = api_key
+
     st.caption(f"Server cố định: `{PROXY_API_URL}`")
 
     st.subheader("Cấu hình")
     voice_names = list(voices.keys())
-    default_voice = settings_data.get("selected_voice_name", "Mặc định")
-    voice_index = voice_names.index(default_voice) if default_voice in voice_names else 0
+    if not voice_names:
+        voices = DEFAULT_VOICES.copy()
+        st.session_state["voices"] = voices
+        voice_names = list(voices.keys())
+
+    saved_voice = st.session_state.get("selected_voice_name", "Mặc định")
+    if saved_voice not in voice_names:
+        saved_voice = voice_names[0]
+
+    voice_index = voice_names.index(saved_voice)
     selected_voice_name = st.selectbox("Giọng", voice_names, index=voice_index)
-    speed = st.text_input("Speed", value=settings_data.get("speed", "1.0"))
-    pause_ms = st.text_input("Nghỉ giữa câu (ms)", value=settings_data.get("pause_ms", "300"))
-    output_name = st.text_input("Tên file output", value=settings_data.get("output_name", "final_output.mp3"))
+    speed = st.text_input("Speed", value=st.session_state.get("speed", "1.0"))
+    pause_ms = st.text_input("Nghỉ giữa câu (ms)", value=st.session_state.get("pause_ms", "300"))
+    output_name = st.text_input("Tên file output", value=st.session_state.get("output_name", "final_output.mp3"))
+
+    st.session_state["selected_voice_name"] = selected_voice_name
+    st.session_state["speed"] = speed
+    st.session_state["pause_ms"] = pause_ms
+    st.session_state["output_name"] = output_name
 
     st.subheader("Quản lý giọng")
     new_voice_name = st.text_input("Tên hiển thị")
@@ -650,8 +755,9 @@ with st.sidebar:
                 st.warning("Nhập đầy đủ Tên hiển thị và Voice ID.")
             else:
                 voices[new_voice_name.strip()] = new_voice_id.strip()
-                save_voices(voices)
-                st.success("Đã lưu giọng.")
+                st.session_state["voices"] = voices
+                save_browser_state(localS)
+                st.success("Đã lưu giọng trên trình duyệt.")
                 st.rerun()
 
     with c2:
@@ -660,19 +766,37 @@ with st.sidebar:
                 del voices[selected_voice_name]
                 if not voices:
                     voices = DEFAULT_VOICES.copy()
-                save_voices(voices)
+                st.session_state["voices"] = voices
+
+                if st.session_state.get("selected_voice_name") not in voices:
+                    st.session_state["selected_voice_name"] = list(voices.keys())[0]
+
+                save_browser_state(localS)
                 st.success("Đã xóa giọng.")
                 st.rerun()
 
     if st.button("Lưu cấu hình", use_container_width=True):
-        save_settings({
-            "proxy_api_key": api_key,
-            "speed": speed,
-            "pause_ms": pause_ms,
-            "output_name": output_name,
-            "selected_voice_name": selected_voice_name,
-        })
-        st.success("Đã lưu cấu hình.")
+        save_browser_state(localS)
+        st.success("Đã lưu cấu hình trên trình duyệt.")
+
+    if st.button("Xóa dữ liệu trình duyệt", use_container_width=True):
+        clear_browser_state(localS)
+
+        st.session_state["project_name"] = DEFAULT_SETTINGS["project_name"]
+        st.session_state["proxy_api_key"] = DEFAULT_SETTINGS["proxy_api_key"]
+        st.session_state["speed"] = DEFAULT_SETTINGS["speed"]
+        st.session_state["pause_ms"] = DEFAULT_SETTINGS["pause_ms"]
+        st.session_state["output_name"] = DEFAULT_SETTINGS["output_name"]
+        st.session_state["selected_voice_name"] = DEFAULT_SETTINGS["selected_voice_name"]
+        st.session_state["main_text"] = DEFAULT_SETTINGS["main_text"]
+        st.session_state["input_mode"] = DEFAULT_SETTINGS["input_mode"]
+        st.session_state["voices"] = DEFAULT_VOICES.copy()
+        st.session_state["runtime_logs"] = []
+
+        st.success("Đã xóa dữ liệu lưu trên trình duyệt.")
+        st.rerun()
+
+save_browser_state(localS)
 
 tab1, tab2 = st.tabs(["Tạo audio", "Câu / Preview"])
 
@@ -681,9 +805,12 @@ with tab1:
 
     with left:
         st.subheader("Nhập văn bản / SRT")
-        upload_col1, upload_col2, upload_col3 = st.columns([1, 1, 1])
 
-        uploaded_file = st.file_uploader("Upload .txt hoặc .srt", type=["txt", "srt"], label_visibility="collapsed")
+        uploaded_file = st.file_uploader(
+            "Upload .txt hoặc .srt",
+            type=["txt", "srt"],
+            label_visibility="collapsed"
+        )
 
         loaded_text = ""
         if uploaded_file is not None:
@@ -699,39 +826,48 @@ with tab1:
 
                 if uploaded_file.name.lower().endswith(".srt"):
                     st.session_state["input_mode"] = "srt"
-                    items = parse_srt_blocks(text_data)
-                    preview_lines = []
-                    for item in items:
-                        preview_lines.append(f"[{item['index']}] {item['timeline']}")
-                        preview_lines.append(item["text"])
-                        preview_lines.append("")
-                    loaded_text = "\n".join(preview_lines).strip()
+                    loaded_text = text_data
                 else:
                     st.session_state["input_mode"] = "text"
                     loaded_text = text_data
+
+                st.session_state["main_text"] = loaded_text
+                save_browser_state(localS)
+
             except Exception as e:
                 st.error(f"Lỗi đọc file: {e}")
 
         default_text = loaded_text if loaded_text else st.session_state.get("main_text", "")
         main_text = st.text_area("Nội dung", value=default_text, height=360, label_visibility="collapsed")
         st.session_state["main_text"] = main_text
+        save_browser_state(localS)
 
-        col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 1])
+        col_btn1, col_btn2, col_btn3, col_btn4 = st.columns([1, 1, 1, 1])
         with col_btn1:
             run_tts_btn = st.button("Chạy TTS", use_container_width=True)
         with col_btn2:
             remerge_btn = st.button("Ghép lại file tổng", use_container_width=True)
         with col_btn3:
             clear_btn = st.button("Xóa nội dung", use_container_width=True)
+        with col_btn4:
+            clear_runtime_btn = st.button("Xóa file tạm server", use_container_width=True)
 
         if clear_btn:
             st.session_state["main_text"] = ""
             st.session_state["input_mode"] = "text"
+            save_browser_state(localS)
+            st.rerun()
+
+        if clear_runtime_btn:
+            clear_runtime_files()
+            st.success("Đã xóa file tạm trên máy chạy Streamlit.")
             st.rerun()
 
     with right:
         st.subheader("Trạng thái")
-        st.info(f"Input mode: {st.session_state['input_mode']}")
+        st.info(f"Project: {st.session_state.get('project_name', 'default')}")
+        st.info(f"Input mode: {st.session_state.get('input_mode', 'text')}")
+
         if api_key.strip():
             key_preview = api_key[:4] + "..." + api_key[-2:] if len(api_key) >= 8 else "***"
             st.success(f"API key: {key_preview}")
@@ -749,24 +885,19 @@ with tab1:
             st.warning("Nhập API key trước.")
         else:
             try:
-                voice_id = voices[selected_voice_name]
+                voice_id = st.session_state["voices"][selected_voice_name]
                 speed_val = float(speed.strip())
                 pause_val = int(pause_ms.strip())
 
-                save_settings({
-                    "proxy_api_key": api_key,
-                    "speed": speed,
-                    "pause_ms": pause_ms,
-                    "output_name": output_name,
-                    "selected_voice_name": selected_voice_name,
-                })
-
                 st.session_state["runtime_logs"] = [
                     "=" * 60,
+                    f"Project: {st.session_state.get('project_name', 'default')}",
                     f"Proxy: {PROXY_API_URL}",
                     f"Giọng: {selected_voice_name} | voice_id={voice_id}",
                     f"Speed: {speed_val} | Pause: {pause_val} ms | Mode: {st.session_state['input_mode']}",
                 ]
+
+                save_browser_state(localS)
 
                 if st.session_state["input_mode"] == "srt":
                     final_path, logs = asyncio.run(
@@ -881,7 +1012,7 @@ with tab2:
                         st.warning("Nội dung câu không được trống.")
                     else:
                         try:
-                            voice_id = voices[selected_voice_name]
+                            voice_id = st.session_state["voices"][selected_voice_name]
                             speed_val = float(speed.strip())
 
                             item["text"] = edited_text.strip()
@@ -910,15 +1041,19 @@ with tab2:
                 if st.button("Đồng bộ text chính", use_container_width=True):
                     meta_now = load_sentences_meta()
                     if any("timeline" in x for x in meta_now):
-                        lines = []
+                        blocks = []
                         for it in sorted(meta_now, key=lambda x: x["index"]):
-                            tl = it.get("timeline", "")
-                            lines.append(f"[{it['index']}] {tl}".strip())
-                            lines.append(it["text"])
-                            lines.append("")
-                        st.session_state["main_text"] = "\n".join(lines).strip()
+                            blocks.append(str(it["index"]))
+                            blocks.append(it.get("timeline", ""))
+                            blocks.append(it["text"])
+                            blocks.append("")
+                        st.session_state["main_text"] = "\n".join(blocks).strip()
+                        st.session_state["input_mode"] = "srt"
                     else:
                         st.session_state["main_text"] = rebuild_full_text_from_meta(meta_now)
+                        st.session_state["input_mode"] = "text"
+
+                    save_browser_state(localS)
                     st.success("Đã đồng bộ.")
                     st.rerun()
 
@@ -931,7 +1066,4 @@ with tab2:
                     file_name=audio_path.name,
                     mime="audio/mpeg",
                     use_container_width=False,
-
                 )
-
-
