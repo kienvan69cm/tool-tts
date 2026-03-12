@@ -2,3 +2,4 @@ streamlit
 httpx
 pydub
 audioop-lts; python_version >= "3.13"
+streamlit-local-storage
