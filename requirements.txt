@@ -1,4 +1,4 @@
 streamlit
 httpx
 pydub
-pyaudioop
+audioop-lts; python_version >= "3.13"
