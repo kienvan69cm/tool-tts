@@ -21,7 +21,7 @@ VOICES_FILE = APP_DIR / "voices.json"
 SETTINGS_FILE = APP_DIR / "settings.json"
 SENTENCES_META_FILE = OUTPUT_DIR / "sentences.json"
 
-PROXY_API_URL = "http://127.0.0.1:8787/v1/tts"
+PROXY_API_URL = "http://113.161.55.198:8787/v1/tts"
 
 DEFAULT_VOICES = {
     "Mặc định": "hruBcESGYx2AUWRppNacCd"
@@ -930,4 +930,5 @@ with tab2:
                     file_name=audio_path.name,
                     mime="audio/mpeg",
                     use_container_width=False,
+
                 )
